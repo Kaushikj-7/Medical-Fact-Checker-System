@@ -30,6 +30,14 @@ Respond ONLY with valid JSON:
 }"""
 
 
+STOPWORDS = {"does", "what", "can", "will", "the", "for", "with", "and", "are", "about", "that", "this", "from", "have", "you"}
+
+
+def _extract_fallback_keywords(claim: str) -> str:
+    tokens = [w for w in re.findall(r"\b[a-zA-Z]{3,}\b", claim) if w.lower() not in STOPWORDS]
+    return " ".join(tokens) if tokens else claim
+
+
 class MedicalEvaluator:
     """Evaluates retrieved local evidence against claim sufficiency."""
 
@@ -38,14 +46,15 @@ class MedicalEvaluator:
         self.threshold = confidence_threshold
 
     def evaluate(self, claim: str, documents: List[Document]) -> EvaluationResult:
+        fallback_kw = _extract_fallback_keywords(claim)
+
         if not documents:
-            clean_terms = " ".join(re.findall(r"\b[a-zA-Z]{3,}\b", claim)[:4])
             return EvaluationResult(
                 is_sufficient=False,
                 confidence=0.0,
                 rationale="No local evidence was retrieved.",
                 search_source="pubmed",
-                search_keywords=clean_terms or claim,
+                search_keywords=fallback_kw,
             )
 
         context_lines = []
@@ -62,20 +71,22 @@ class MedicalEvaluator:
             if conf < self.threshold:
                 is_suff = False
 
+            raw_kw = data.get("search_keywords")
+            keywords = str(raw_kw).strip() if (raw_kw and str(raw_kw).strip().lower() != "none") else fallback_kw
+
             return EvaluationResult(
                 is_sufficient=is_suff,
                 confidence=round(conf, 3),
                 rationale=str(data.get("rationale", "")),
                 search_source=str(data.get("search_source", "pubmed")).lower(),
-                search_keywords=str(data.get("search_keywords", claim)),
+                search_keywords=keywords,
             )
         except Exception as e:
             logger.warning("Evaluator failed to parse LLM response: %s; triggering corrective search", e)
-            clean_terms = " ".join(re.findall(r"\b[a-zA-Z]{3,}\b", claim)[:4])
             return EvaluationResult(
                 is_sufficient=False,
                 confidence=0.3,
                 rationale=f"Evaluation fallback triggered: {e}",
                 search_source="pubmed",
-                search_keywords=clean_terms or claim,
+                search_keywords=fallback_kw,
             )

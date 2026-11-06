@@ -75,8 +75,19 @@ class ChromaStore:
         if not documents:
             return
 
-        ids = [doc.id for doc in documents]
-        documents_text = [f"{doc.title}\n{doc.text}" for doc in documents]
+        # In-batch deduplication by document ID to avoid chromadb DuplicateIDError
+        seen_ids = set()
+        unique_docs: List[Document] = []
+        for doc in documents:
+            if doc.id and doc.id not in seen_ids:
+                seen_ids.add(doc.id)
+                unique_docs.append(doc)
+
+        if not unique_docs:
+            return
+
+        ids = [doc.id for doc in unique_docs]
+        documents_text = [f"{doc.title}\n{doc.text}" for doc in unique_docs]
         metadatas = [
             {
                 "title": doc.title,
@@ -85,7 +96,7 @@ class ChromaStore:
                 "url": doc.url,
                 "published": doc.published,
             }
-            for doc in documents
+            for doc in unique_docs
         ]
 
         self.collection.upsert(

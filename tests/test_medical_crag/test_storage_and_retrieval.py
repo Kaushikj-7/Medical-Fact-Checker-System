@@ -58,7 +58,7 @@ def test_bm25_index():
 
 
 def test_hybrid_retriever(temp_chroma_dir):
-    store = ChromaStore(persist_dir=temp_chroma_dir, collection_name="test_med_hybrid")
+    store = ChromaStore(persist_dir=temp_chroma_dir, collection_name="test_med_hybrid", auto_seed=False)
     docs = [
         Document(
             id="doc-1",

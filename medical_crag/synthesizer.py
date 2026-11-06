@@ -83,13 +83,26 @@ class MedicalSynthesizer:
             if verdict_str not in [v.value for v in Verdict]:
                 verdict_str = Verdict.INSUFFICIENT_EVIDENCE.value
 
+            explanation = str(data.get("clinical_explanation", ""))
+
+            # Extract bracket citations e.g. [1], [2] to strictly ground sources
+            import re
+            cited_indices = [int(m) for m in re.findall(r"\[(\d+)\]", explanation)]
+            grounded_sources: List[SourceCitation] = []
+            if cited_indices:
+                for idx in sorted(set(cited_indices)):
+                    if 1 <= idx <= len(citations):
+                        grounded_sources.append(citations[idx - 1])
+            else:
+                grounded_sources = citations[:2]
+
             return MedicalCRAGResult(
                 claim=claim,
                 verdict=verdict_str,
                 confidence=round(float(data.get("confidence", 0.7)), 3),
                 consumer_summary=str(data.get("consumer_summary", "")),
-                clinical_explanation=str(data.get("clinical_explanation", "")),
-                sources=citations,
+                clinical_explanation=explanation,
+                sources=grounded_sources,
                 corrective_action_taken=corrective_taken,
                 execution_time_ms=execution_ms,
                 llm_provider_used=provider,
