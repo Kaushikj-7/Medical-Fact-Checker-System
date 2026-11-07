@@ -23,7 +23,7 @@ Standard Retrieval-Augmented Generation (RAG) fails in clinical healthcare becau
 
 ---
 
-## 🏗️ ByteByteGo-Style System Architecture
+## 🏗️ System Architecture
 
 ![Medical Corrective RAG ByteByteGo Architecture](assets/medical_crag_bytebytego_architecture.png)
 
