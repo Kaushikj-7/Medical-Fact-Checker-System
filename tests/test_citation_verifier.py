@@ -333,3 +333,71 @@ class TestNovelAdversarialJSONScenarios:
         data = parse_json_payload(raw)
         assert data["verdict"] == "SUPPORTED"
         assert "Comprehensive evidence" in data["detail"]
+
+
+# ==============================================================================
+# Deterministic Citation Verifier Suite
+# ==============================================================================
+
+from medical_crag.synthesizer import verify_citations
+from medical_crag.types import MedicalCRAGResult, SourceCitation
+
+
+class TestDeterministicCitationVerifier:
+    """Verifies citation extraction, grounding against valid doc IDs, and precision scoring."""
+
+    def test_all_valid_index_citations(self) -> None:
+        result = MedicalCRAGResult(
+            claim="Metformin reduces HbA1c",
+            verdict="SUPPORTED",
+            confidence=0.9,
+            consumer_summary="Summary",
+            clinical_explanation="Metformin demonstrated efficacy in randomized trials [1] and meta-analyses [2].",
+        )
+        valid_ids = {"pmid-100", "pmid-200"}
+        idx_map = {1: "pmid-100", 2: "pmid-200"}
+
+        verified = verify_citations(result, valid_doc_ids=valid_ids, index_to_id_map=idx_map)
+        assert verified.citation_precision == 1.0
+        assert set(verified.verified_citations) == {"pmid-100", "pmid-200"}
+
+    def test_direct_id_citations(self) -> None:
+        result = MedicalCRAGResult(
+            claim="Grapefruit interacts with statins",
+            verdict="SUPPORTED",
+            confidence=0.95,
+            consumer_summary="Summary",
+            clinical_explanation="FDA package insert [fda-statin-grapefruit-01] warns of CYP3A4 inhibition.",
+        )
+        valid_ids = {"fda-statin-grapefruit-01", "pmid-999"}
+        verified = verify_citations(result, valid_doc_ids=valid_ids)
+        assert verified.citation_precision == 1.0
+        assert verified.verified_citations == ["fda-statin-grapefruit-01"]
+
+    def test_hallucinated_citation_detection(self) -> None:
+        result = MedicalCRAGResult(
+            claim="Some medical claim",
+            verdict="SUPPORTED",
+            confidence=0.8,
+            consumer_summary="Summary",
+            clinical_explanation="Evidence from valid study [1] conflicts with phantom study [99].",
+        )
+        valid_ids = {"pmid-valid-01"}
+        idx_map = {1: "pmid-valid-01"}
+
+        verified = verify_citations(result, valid_doc_ids=valid_ids, index_to_id_map=idx_map)
+        # 1 valid out of 2 total citations cited -> precision = 0.50
+        assert verified.citation_precision == 0.50
+        assert verified.verified_citations == ["pmid-valid-01"]
+
+    def test_no_citations_present(self) -> None:
+        result = MedicalCRAGResult(
+            claim="General advice",
+            verdict="INSUFFICIENT_EVIDENCE",
+            confidence=0.1,
+            consumer_summary="Summary",
+            clinical_explanation="No clinical data available for this assertion.",
+        )
+        verified = verify_citations(result, valid_doc_ids={"doc-1"})
+        assert verified.citation_precision == 1.0
+        assert verified.verified_citations == []

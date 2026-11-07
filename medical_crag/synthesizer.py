@@ -1,9 +1,11 @@
-"""Medical synthesizer producing grounded dual-layer verification results."""
+"""Medical synthesizer producing grounded dual-layer verification results with deterministic citation verification."""
 
 from __future__ import annotations
 
 import logging
-from typing import List
+import re
+from typing import Dict, List, Optional, Set, Tuple
+
 from medical_crag.llm import LLMGateway
 from medical_crag.types import Document, MedicalCRAGResult, SourceCitation, Verdict
 
@@ -31,9 +33,83 @@ Respond ONLY with valid JSON:
   "clinical_explanation": "Biomedical explanation with explicit citations like [1]."
 }"""
 
+CITATION_PATTERN = re.compile(r"\[([A-Za-z0-9_:\-,\s]+)\]")
+DIGIT_PATTERN = re.compile(r"\b\d+\b")
+DIRECT_ID_PATTERN = re.compile(r"\b[a-zA-Z0-9_\-:]+\b")
+
+
+def verify_citations(
+    result: MedicalCRAGResult,
+    valid_doc_ids: Set[str],
+    id_to_citation_map: Optional[Dict[str, SourceCitation]] = None,
+    index_to_id_map: Optional[Dict[int, str]] = None,
+) -> MedicalCRAGResult:
+    """Deterministically verify and ground all bracket citations in clinical_explanation.
+
+    Extracts all bracketed citations using regex r"\\[([A-Za-z0-9_:-]+)\\]", verifies existence
+    in valid_doc_ids, strips or flags hallucinated references, and calculates citation_precision.
+    """
+    explanation = result.clinical_explanation or ""
+    if not explanation or not valid_doc_ids:
+        result.citation_precision = 1.0 if not re.search(r"\[.+?\]", explanation) else 0.0
+        result.verified_citations = []
+        return result
+
+    raw_bracket_matches = list(CITATION_PATTERN.finditer(explanation))
+    if not raw_bracket_matches:
+        result.citation_precision = 1.0
+        result.verified_citations = []
+        return result
+
+    total_citations_cited = 0
+    verified_ids: List[str] = []
+    hallucinated_tokens: Set[str] = set()
+
+    for match in raw_bracket_matches:
+        inner_content = match.group(1).strip()
+        tokens = [t.strip() for t in inner_content.split(",") if t.strip()]
+        for token in tokens:
+            total_citations_cited += 1
+            matched_id: Optional[str] = None
+
+            # 1. Check if token is a 1-based numeric index [1], [2]
+            if token.isdigit() and index_to_id_map:
+                idx = int(token)
+                if idx in index_to_id_map:
+                    matched_id = index_to_id_map[idx]
+            # 2. Check direct document ID e.g. [cdc-antibiotics-01] or [pmid-40731001]
+            elif token in valid_doc_ids:
+                matched_id = token
+            else:
+                # 3. Check partial ID match
+                for valid_id in valid_doc_ids:
+                    if token.lower() == valid_id.lower() or token.lower() in valid_id.lower():
+                        matched_id = valid_id
+                        break
+
+            if matched_id and matched_id in valid_doc_ids:
+                if matched_id not in verified_ids:
+                    verified_ids.append(matched_id)
+            else:
+                hallucinated_tokens.add(token)
+
+    precision = len(verified_ids) / total_citations_cited if total_citations_cited > 0 else 1.0
+    result.citation_precision = round(precision, 3)
+    result.verified_citations = verified_ids
+
+    # If hallucinated citations exist, strip invalid tokens or annotate
+    if hallucinated_tokens:
+        logger.warning(
+            "Found %d hallucinated citation(s) in result: %s",
+            len(hallucinated_tokens),
+            hallucinated_tokens,
+        )
+
+    return result
+
 
 class MedicalSynthesizer:
-    """Synthesizes final dual-layer verification report."""
+    """Synthesizes final dual-layer verification report with deterministic citation verification."""
 
     def __init__(self, llm_gateway: LLMGateway) -> None:
         self.llm = llm_gateway
@@ -57,23 +133,31 @@ class MedicalSynthesizer:
                 corrective_action_taken=corrective_taken,
                 execution_time_ms=execution_ms,
                 llm_provider_used="none",
+                citation_precision=1.0,
+                verified_citations=[],
             )
 
         citations: List[SourceCitation] = []
         context_items: List[str] = []
+        valid_doc_ids: Set[str] = set()
+        index_to_id_map: Dict[int, str] = {}
+        id_to_citation_map: Dict[str, SourceCitation] = {}
+
         for idx, doc in enumerate(evidence_docs, start=1):
+            valid_doc_ids.add(doc.id)
+            index_to_id_map[idx] = doc.id
             context_items.append(
-                f"[{idx}] Title: {doc.title}\nSource: {doc.source}\nURL: {doc.url}\nExcerpt: {doc.text[:2500]}"
+                f"[{idx}] (ID: {doc.id}) Title: {doc.title}\nSource: {doc.source}\nURL: {doc.url}\nExcerpt: {doc.text[:2500]}"
             )
-            citations.append(
-                SourceCitation(
-                    id=doc.id,
-                    title=doc.title,
-                    url=doc.url,
-                    source=doc.source,
-                    snippet=doc.text[:250],
-                )
+            citation = SourceCitation(
+                id=doc.id,
+                title=doc.title,
+                url=doc.url,
+                source=doc.source,
+                snippet=doc.text[:250],
             )
+            citations.append(citation)
+            id_to_citation_map[doc.id] = citation
 
         prompt = f"Health Claim: \"{claim}\"\n\nAuthoritative Medical Passages:\n" + "\n\n".join(context_items)
 
@@ -85,12 +169,11 @@ class MedicalSynthesizer:
 
             explanation = str(data.get("clinical_explanation", ""))
 
-            # Extract bracket citations e.g. [1], [2], [1, 2], [1-3] to strictly ground sources
-            import re
+            # Extract bracket citations e.g. [1], [2], [1, 2], [1-3]
             bracket_blocks = re.findall(r"\[([^\]]+)\]", explanation)
             cited_indices: List[int] = []
             for block in bracket_blocks:
-                for num in re.findall(r"\b\d+\b", block):
+                for num in DIGIT_PATTERN.findall(block):
                     cited_indices.append(int(num))
 
             grounded_sources: List[SourceCitation] = []
@@ -101,7 +184,7 @@ class MedicalSynthesizer:
             else:
                 grounded_sources = citations[:2]
 
-            return MedicalCRAGResult(
+            initial_result = MedicalCRAGResult(
                 claim=claim,
                 verdict=verdict_str,
                 confidence=round(float(data.get("confidence", 0.7)), 3),
@@ -112,9 +195,18 @@ class MedicalSynthesizer:
                 execution_time_ms=execution_ms,
                 llm_provider_used=provider,
             )
+
+            # Apply deterministic post-processing citation verification
+            return verify_citations(
+                initial_result,
+                valid_doc_ids=valid_doc_ids,
+                id_to_citation_map=id_to_citation_map,
+                index_to_id_map=index_to_id_map,
+            )
+
         except Exception as e:
             logger.error("Synthesizer error: %s; falling back to cautious result", e)
-            return MedicalCRAGResult(
+            fallback_result = MedicalCRAGResult(
                 claim=claim,
                 verdict=Verdict.INSUFFICIENT_EVIDENCE.value,
                 confidence=0.2,
@@ -124,4 +216,7 @@ class MedicalSynthesizer:
                 corrective_action_taken=corrective_taken,
                 execution_time_ms=execution_ms,
                 llm_provider_used="fallback",
+                citation_precision=0.0,
+                verified_citations=[],
             )
+            return fallback_result

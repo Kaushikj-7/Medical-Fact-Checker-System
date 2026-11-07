@@ -11,30 +11,23 @@ def format_cli_output(result) -> str:
     sep = "=" * 65
     sub_sep = "-" * 65
 
-    verdict_emoji = {
-        "SUPPORTED": "✅",
-        "REFUTED": "❌",
-        "MISLEADING": "⚠️",
-        "INSUFFICIENT_EVIDENCE": "❓",
-    }.get(result.verdict, "ℹ️")
-
     lines = [
         "",
         sep,
-        f"🏥 MEDICAL CORRECTIVE RAG VERIFICATION",
+        "MEDICAL CORRECTIVE RAG VERIFICATION",
         sep,
         f"Claim: \"{result.claim}\"",
-        f"Verdict: {verdict_emoji} {result.verdict} (Confidence: {result.confidence:.0%})",
+        f"Verdict: {result.verdict} (Confidence: {result.confidence:.0%})",
         f"Execution Time: {result.execution_time_ms} ms | Provider: {result.llm_provider_used}",
         f"Corrective Action: {'Triggered (External Search & Ingested)' if result.corrective_action_taken else 'Not Needed (Local Store Sufficient)'}",
         sub_sep,
-        "📋 PATIENT SUMMARY (Plain Language):",
+        "PATIENT SUMMARY (Plain Language):",
         f"  {result.consumer_summary}",
         "",
-        "🔬 CLINICAL PROOF CHAIN (Biomedical Evidence):",
+        "CLINICAL PROOF CHAIN (Biomedical Evidence):",
         f"  {result.clinical_explanation}",
         "",
-        "📚 AUTHORITATIVE SOURCES CITED:",
+        "AUTHORITATIVE SOURCES CITED:",
     ]
 
     if not result.sources:
@@ -64,10 +57,10 @@ def main() -> None:
             sys.exit(0)
 
     if not claim:
-        print("Error: claim cannot be empty.")
+        print("Error: No claim provided.")
         sys.exit(1)
 
-    print(f"\n🔍 Processing claim through Corrective RAG: '{claim}'...")
+    print(f"\nProcessing claim through Corrective RAG: '{claim}'...")
     pipeline = MedicalCRAGPipeline()
     result = pipeline.verify(claim)
     print(format_cli_output(result))

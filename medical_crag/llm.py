@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import base64
 import json
 import logging
 import re
@@ -630,3 +631,108 @@ class LLMGateway:
             raise RuntimeError(f"Model emitted an empty JSON dictionary: {raw_text}")
 
         return data, provider
+
+    def extract_claim_from_image(
+        self,
+        image_bytes: bytes,
+        mime_type: str = "image/jpeg",
+    ) -> tuple[str, str]:
+        """Extract biomedical claim and detect language from image using multimodal LLM.
+
+        Returns:
+            tuple[str, str]: (extracted_claim_in_english, detected_language)
+        """
+        b64_data = base64.b64encode(image_bytes).decode("utf-8")
+        vision_prompt = (
+            "Analyze this health/medical image (e.g. social media claim, news snippet, medicine/supplement label).\n"
+            "1. Extract the core medical, health, or dietary claim being asserted.\n"
+            "2. Detect the original language. If the claim is not in English, provide the translated claim in clear English.\n"
+            "Respond strictly in JSON format:\n"
+            '{\n  "claim": "Concise health claim in English",\n  "detected_language": "Language name"\n}'
+        )
+
+        # 1. Try Gemini Vision if Gemini key configured
+        if self.settings.gemini_api_key:
+            try:
+                url = (
+                    f"https://generativelanguage.googleapis.com/v1beta/models/"
+                    f"{self.settings.gemini_model}:generateContent"
+                )
+                headers = {"Content-Type": "application/json"}
+                params = {"key": self.settings.gemini_api_key}
+                payload = {
+                    "contents": [
+                        {
+                            "role": "user",
+                            "parts": [
+                                {"text": vision_prompt},
+                                {
+                                    "inline_data": {
+                                        "mime_type": mime_type,
+                                        "data": b64_data,
+                                    }
+                                },
+                            ],
+                        }
+                    ],
+                    "generationConfig": {
+                        "responseMimeType": "application/json",
+                        "temperature": 0.1,
+                    },
+                }
+                with httpx.Client(timeout=self.settings.request_timeout) as client:
+                    resp = client.post(url, headers=headers, params=params, json=payload)
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        candidates = data.get("candidates", [])
+                        if candidates:
+                            text = candidates[0].get("content", {}).get("parts", [{}])[0].get("text", "")
+                            parsed = parse_json_payload(text)
+                            claim = str(parsed.get("claim", "")).strip()
+                            lang = str(parsed.get("detected_language", "English")).strip()
+                            if claim:
+                                return claim, lang
+            except Exception as e:
+                logger.warning("Gemini vision extraction failed: %s; trying OpenRouter", e)
+
+        # 2. Try OpenRouter Vision (using meta-llama/llama-3.2-11b-vision-instruct or configured model)
+        if self.settings.openrouter_api_key:
+            try:
+                vision_model = "meta-llama/llama-3.2-11b-vision-instruct"
+                headers = {
+                    "Authorization": f"Bearer {self.settings.openrouter_api_key}",
+                    "Content-Type": "application/json",
+                    "HTTP-Referer": "https://github.com/Kaushikj-7/SDGforge_hackathon",
+                    "X-Title": "Medical CRAG Vision",
+                }
+                data_url = f"data:{mime_type};base64,{b64_data}"
+                payload = {
+                    "model": vision_model,
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": vision_prompt},
+                                {"type": "image_url", "image_url": {"url": data_url}},
+                            ],
+                        }
+                    ],
+                    "response_format": {"type": "json_object"},
+                    "temperature": 0.1,
+                }
+                with httpx.Client(timeout=self.settings.request_timeout) as client:
+                    resp = client.post(OPENROUTER_API_URL, headers=headers, json=payload)
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        choices = data.get("choices", [])
+                        if choices:
+                            text = choices[0].get("message", {}).get("content", "")
+                            parsed = parse_json_payload(text)
+                            claim = str(parsed.get("claim", "")).strip()
+                            lang = str(parsed.get("detected_language", "English")).strip()
+                            if claim:
+                                return claim, lang
+            except Exception as e:
+                logger.warning("OpenRouter vision extraction failed: %s", e)
+
+        return "Unspecified health claim extracted from image", "Unknown"

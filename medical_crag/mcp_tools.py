@@ -634,6 +634,147 @@ class MCPClient:
         else:
             return self.search_pubmed(query, max_results=max_results)
 
+    async def search_async(
+        self, source: str, query: str, max_results: int = 3, timeout: float | None = None
+    ) -> list[Document]:
+        """Async execution of a single MCP search tool with per-tool timeout."""
+        import asyncio
+
+        effective_timeout = timeout if timeout is not None else max(getattr(self, "timeout", 10.0), 10.0)
+        try:
+            return await asyncio.wait_for(
+                asyncio.to_thread(self.search, source, query, max_results),
+                timeout=effective_timeout,
+            )
+        except asyncio.TimeoutError:
+            logger.warning("MCP %s search timed out after %.1fs", source, effective_timeout)
+            return []
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("MCP %s search failed: %s", source, exc)
+            return []
+
+    async def search_all_async(
+        self,
+        sources: list[str],
+        query: str,
+        max_results_per_source: int = 3,
+        per_tool_timeout: float | None = None,
+    ) -> list[Document]:
+        """Concurrently query all requested target_mcps using asyncio.gather with per-tool timeouts."""
+        import asyncio
+
+        if not sources:
+            sources = ["pubmed"]
+        unique_sources = list(dict.fromkeys(sources))
+        if len(unique_sources) == 1:
+            return await self.search_async(unique_sources[0], query, max_results=max_results_per_source, timeout=per_tool_timeout)
+
+        tasks = [
+            self.search_async(src, query, max_results=max_results_per_source, timeout=per_tool_timeout)
+            for src in unique_sources
+        ]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        all_docs: list[Document] = []
+        for src, res in zip(unique_sources, results):
+            if isinstance(res, list):
+                all_docs.extend(res)
+            elif isinstance(res, Exception):
+                logger.warning("MCP source %s encountered exception in gather: %s", src, res)
+        return all_docs
+
+    def search_all(
+        self,
+        sources: list[str],
+        query: str,
+        max_results_per_source: int = 3,
+        per_tool_timeout: float | None = None,
+    ) -> list[Document]:
+        """Synchronously execute parallel MCP searches across all target sources."""
+        import asyncio
+        import concurrent.futures
+
+        unique_sources = list(dict.fromkeys(sources)) if sources else ["pubmed"]
+        if len(unique_sources) == 1:
+            return self.search(unique_sources[0], query, max_results=max_results_per_source)
+
+        effective_timeout = per_tool_timeout if per_tool_timeout is not None else max(getattr(self, "timeout", 10.0), 10.0)
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                with concurrent.futures.ThreadPoolExecutor(max_workers=len(unique_sources)) as pool:
+                    futures = [
+                        pool.submit(self.search, src, query, max_results_per_source)
+                        for src in unique_sources
+                    ]
+                    docs: list[Document] = []
+                    for f in futures:
+                        try:
+                            docs.extend(f.result(timeout=effective_timeout))
+                        except Exception as e:
+                            logger.warning("Parallel search worker error: %s", e)
+                    return docs
+            else:
+                return loop.run_until_complete(
+                    self.search_all_async(unique_sources, query, max_results_per_source, effective_timeout)
+                )
+        except Exception:
+            return asyncio.run(
+                self.search_all_async(unique_sources, query, max_results_per_source, effective_timeout)
+            )
+
+
+def gate_mcp_documents(
+    documents: list[Document],
+    query: str,
+    min_relevance: float = 0.50,
+    min_length: int = 15,
+) -> list[Document]:
+    """Gated write-back: Filter external MCP documents to prevent index poisoning.
+
+    Ensures documents are substantive and clinically relevant before ChromaDB auto-ingestion.
+    """
+    if not documents:
+        return []
+
+    from medical_crag.evaluator import STOPWORDS
+
+    tokens = [
+        t.lower()
+        for t in re.findall(r"\b[a-zA-Z0-9_\-]{3,}\b", query.lower())
+        if t.lower() not in STOPWORDS
+    ]
+
+    admitted: list[Document] = []
+    for doc in documents:
+        content = (doc.text or "").strip()
+        if len(content) < min_length:
+            logger.debug("Gated out MCP doc %s: content length %d < %d", doc.id, len(content), min_length)
+            continue
+
+        if not tokens:
+            admitted.append(doc)
+            continue
+
+        doc_text = f"{doc.title} {doc.text}".lower()
+        matched = sum(1 for t in tokens if t in doc_text)
+        relevance = matched / len(tokens)
+
+        # Admitted if relevance >= threshold, or if single key entity is present
+        if relevance >= min_relevance or (len(tokens) <= 2 and matched >= 1):
+            admitted.append(doc)
+        else:
+            logger.debug(
+                "Gated out MCP doc %s: relevance %.2f < %.2f (matched %d/%d tokens: %s)",
+                doc.id,
+                relevance,
+                min_relevance,
+                matched,
+                len(tokens),
+                tokens,
+            )
+
+    return admitted
+
 
 def search_pubmed(query: str, max_results: int = 3, timeout: float = 8.0) -> list[Document]:
     """Convenience functional wrapper for MCPClient.search_pubmed."""
