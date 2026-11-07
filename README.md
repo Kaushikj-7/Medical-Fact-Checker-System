@@ -7,7 +7,7 @@
 [![NCBI PubMed](https://img.shields.io/badge/External%20Source-NCBI%20PubMed-red.svg)](https://pubmed.ncbi.nlm.nih.gov/)
 [![openFDA](https://img.shields.io/badge/External%20Source-openFDA-orange.svg)](https://open.fda.gov/)
 [![WHO DON](https://img.shields.io/badge/External%20Source-WHO%20DON-teal.svg)](https://www.who.int/emergencies/disease-outbreak-news)
-[![Test Suite](https://img.shields.io/badge/Tests-140%20Passed-brightgreen.svg)]()
+[![Test Suite](https://img.shields.io/badge/Tests-233%20Passed-brightgreen.svg)]()
 
 ---
 
@@ -25,7 +25,7 @@ Standard Retrieval-Augmented Generation (RAG) fails in clinical healthcare becau
 
 ## 🏗️ ByteByteGo-Style System Architecture
 
-![Medical Corrective RAG ByteByteGo Architecture](assets/medical_crag_bytebytego_architecture.png)
+![Medical Corrective RAG ByteByteGo Architecture](docs/images/medical_crag_bytebytego_architecture.png)
 
 ### End-to-End Sequence & Decision Flow
 
@@ -249,7 +249,24 @@ python -m pytest tests/test_medical_crag/ -v
 python -m pytest tests/test_live_crag.py -v
 ```
 
-### Run All Tests Combined (140 tests)
+### FastAPI & Server-Sent Events (SSE) Streaming
+Run the production server with auto-reload:
+```bash
+uvicorn medical_crag.api:app --host 0.0.0.0 --port 8000 --reload
+```
+Available Endpoints:
+- `POST /api/v1/verify`: JSON verification payload `{"claim": "..."}`
+- `GET /api/v1/verify/stream`: Real-time stage transition SSE stream (`retrieve -> evaluate -> mcp_correct -> synthesize -> complete`)
+- `POST /api/v1/verify/image`: Multimodal claim extraction and verification from uploaded screenshot/image
+- `GET /health`: Service health check
+
+---
+
+## 🧪 Testing & Verification
+
+The test suite enforces clean architecture, TDD, zero mock cheating, and full end-to-end reliability.
+
+### Run Full Test Suite (233 tests)
 ```bash
 python -m pytest tests/ -v
 ```
@@ -260,30 +277,37 @@ python -m pytest tests/ -v
 
 ```
 Rag-medical/
-├── assets/
-│   └── medical_crag_bytebytego_architecture.png  # ByteByteGo architecture diagram
+├── docs/
+│   ├── ARCHITECTURE.md      # Comprehensive technical architecture specification
+│   └── images/
+│       └── medical_crag_bytebytego_architecture.png  # ByteByteGo architecture diagram
 ├── medical_crag/
 │   ├── __init__.py          # Package initialization and exports
 │   ├── __main__.py          # Entrypoint for python -m medical_crag
+│   ├── api.py               # FastAPI REST, SSE streaming, and image upload endpoints
 │   ├── cli.py               # Formatted CLI presentation & banner printer
 │   ├── config.py            # Environment validation, masking & multi-path loader
-│   ├── evaluator.py         # Dynamic relevance & confidence evaluator
-│   ├── llm.py               # Multi-provider LLM gateway (OpenRouter + Gemini)
+│   ├── evaluator.py         # Ternary state machine, per-passage grading & multi-MCP router
+│   ├── llm.py               # Multi-provider LLM gateway (OpenRouter + Gemini Vision)
 │   ├── mcp_tools.py         # Authoritative medical search clients (PubMed, openFDA, WHO)
-│   ├── pipeline.py          # 4-stage Corrective RAG pipeline orchestrator
-│   ├── retriever.py         # Hybrid BM25 + ChromaDB Reciprocal Rank Fusion
-│   ├── storage.py           # Persistent ChromaDB store with starter medical docs
-│   ├── synthesizer.py       # Dual-layer grounded clinical synthesis & citation parser
+│   ├── pipeline.py          # 4-stage Corrective RAG pipeline orchestrator with caching
+│   ├── retriever.py         # Dynamic Weighted BM25 + ChromaDB Reciprocal Rank Fusion
+│   ├── storage.py           # Synchronized ChromaDB + SQLite store & claim TTL cache
+│   ├── synthesizer.py       # Dual-layer grounded clinical synthesis & citation verifier
 │   └── types.py             # Strongly typed Pydantic/dataclass models
 ├── tests/
-│   ├── test_medical_crag/   # 98 comprehensive unit tests
-│   ├── test_live_crag.py    # 42 live CRAG validation tests
-│   ├── test_adversarial_llm.py
-│   └── test_challenger_m2_empirical.py
+│   ├── test_medical_crag/   # Isolated core component tests
+│   ├── test_crag_state_machine.py # Ternary CRAG state machine & passage grading
+│   ├── test_citation_verifier.py  # Deterministic citation grounding & verification
+│   ├── test_hybrid_rrf_sync.py    # Synchronized SQLite/ChromaDB & Weighted RRF
+│   ├── test_api_endpoints.py      # FastAPI REST and SSE stream tests
+│   ├── test_live_crag.py          # 42 live CRAG validation tests
+│   └── test_adversarial_llm.py    # Stress testing and JSON resilience
 ├── .env.example             # Template environment configuration
 ├── .gitignore               # Ignored secrets, database & bytecode files
-├── PROJECT.md               # Technical architecture specification
-├── TEST_INFRA.md            # Test framework inventory & runner guidelines
+├── Dockerfile               # Containerized production runtime
+├── pyproject.toml           # Modern package configuration (PEP 517/621)
+├── requirements.txt         # Pinned production dependencies
 └── README.md                # Project documentation
 ```
 
