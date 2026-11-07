@@ -17,52 +17,119 @@ Biomedical misinformation propagates rapidly, carrying severe public health risk
 
 ---
 
-## 2. System Architecture & Component Inventory
+## 2. System Design Architecture & Component Inventory
 
-```
-                         [User Health Claim]
-                                  │
-                                  ▼
-      ┌────────────────────────────────────────────────────────┐
-      │ STAGE 1: SYNCHRONIZED HYBRID RETRIEVAL (RRF)           │
-      │   - Dense: ChromaDB Persistent Embeddings              │
-      │   - Sparse: In-Memory BM25Okapi Index                  │
-      │   - Sync Layer: SQLite Metadata & Content Hash Store   │
-      │   - Adaptive Weighted RRF: alpha_dense vs alpha_sparse │
-      └───────────────────────────┬────────────────────────────┘
-                                  │ Top-K Passages (with scores)
-                                  ▼
-      ┌────────────────────────────────────────────────────────┐
-      │ STAGE 2: TERNARY EVALUATION & PER-PASSAGE GRADING      │
-      │   - Passage-level grading (threshold: 0.50)            │
-      │   - State Machine:                                     │
-      │     * CORRECT   (max >= 0.80, >= 2 survive)            │
-      │     * AMBIGUOUS (0.50 <= max < 0.80)                   │
-      │     * INCORRECT (max < 0.50)                           │
-      └──────────────┬────────────────────────┬────────────────┘
-                     │                        │
-         [CORRECT: Score >= 0.80]     [AMBIGUOUS / INCORRECT]
-                     │                        │
-                     │                        ▼
-                     │       ┌──────────────────────────────────────────────────┐
-                     │       │ STAGE 3: PARALLEL ASYNC MCP MEDICAL SEARCH       │
-                     │       │   - Fan-Out: NCBI PubMed, openFDA, WHO DON       │
-                     │       │   - Timeout: 5.0s per tool + backoff retry       │
-                     │       │   - Gated Ingestion: Filter overlap >= 0.70      │
-                     │       │   - Synchronized SQLite + ChromaDB write-back    │
-                     │       └────────────────────────┬─────────────────────────┘
-                     │                                │
-                     ▼                                ▼
-      ┌────────────────────────────────────────────────────────┐
-      │ STAGE 4: GROUNDED DUAL-LAYER SYNTHESIS                 │
-      │   - Multi-Provider LLM Gateway (OpenRouter / Gemini)   │
-      │   - Dual Outputs: Patient Summary + Clinical Chain     │
-      │   - Post-Processing: Deterministic Citation Verifier   │
-      │   - Metrics: citation_precision & verified_citations   │
-      └───────────────────────────┬────────────────────────────┘
-                                  │
-                                  ▼
-                     [MedicalCRAGResult Output]
+![Medical Corrective RAG System Architecture](images/medical_crag_bytebytego_architecture.png)
+
+### 2.1 Multi-Tier System Design Architecture
+
+```mermaid
+graph TB
+    %% Client & Interface Tier
+    subgraph ClientTier ["1. CLIENT & INGESTION TIER"]
+        WebUI["Web Application / Clinician Dashboard"]
+        BrowserExt["Browser Extension (Real-Time Fact Checker)"]
+        RESTClient["REST & SSE API Consumers"]
+        ImageUpload["Prescription & Medical Screenshot Upload"]
+    end
+
+    %% Ingress & API Gateway Tier
+    subgraph APITier ["2. INGRESS & API GATEWAY TIER (FastAPI)"]
+        APIGateway["FastAPI Async Gateway (medical_crag/api.py)"]
+        SSEStreamer["Server-Sent Events (SSE) Stream Manager"]
+        VisionPreprocessor["Vision & Language Preprocessor (Llama-3.2-Vision)"]
+        RateBudget["Token & Budget Controller (1-2 Calls Max)"]
+    end
+
+    %% Autonomous CRAG Core Engine
+    subgraph EngineTier ["3. AUTONOMOUS CRAG ENGINE TIER"]
+        subgraph Stage1 ["Stage 1: Hybrid Retrieval Engine"]
+            TokenDetector["Clinical Entity & Dosage Detector\n(PMID, NCT, mg, mcg, -statin)"]
+            WeightedRRF["Dynamic Weighted RRF Engine\n(alpha_sparse: 0.5 -> 0.7)"]
+        end
+
+        subgraph Stage2 ["Stage 2: Ternary Evaluator & Pruner"]
+            PassageGrader["Per-Passage Relevance Grader\n(Threshold: 0.50)"]
+            StateMachine["Ternary CRAG State Machine Router\n(CORRECT | AMBIGUOUS | INCORRECT)"]
+        end
+
+        subgraph Stage4 ["Stage 4: Evidence Synthesizer"]
+            Synthesizer["Dual-Layer Medical Synthesizer\n(Patient Summary + Biomedical Proof Chain)"]
+            CitationVerifier["Deterministic Regex Citation Verifier\n(Matches Bracket IDs against Valid Docs)"]
+        end
+    end
+
+    %% Synchronized Storage Subsystem
+    subgraph StorageTier ["4. SYNCHRONIZED STORAGE & CACHE SUBSYSTEM"]
+        ChromaDB[("ChromaDB Vector Store\n(Dense HNSW Cosine Index)")]
+        SQLiteDocs[("SQLite Canonical Store\n(documents & metadata)")]
+        BM25Okapi["In-Memory BM25Okapi Index\n(Atomic Auto-Sync Rebuild)"]
+        ClaimCache[("SQLite Claim Cache\n(SHA-256 Hash + TTL 24h)")]
+        ContentHasher["SHA-256 Content Deduplicator"]
+    end
+
+    %% External MCP Search Federation
+    subgraph MCPTier ["5. EXTERNAL MEDICAL MCP FEDERATION"]
+        MCPDispatcher["Async Parallel Fan-Out Engine\n(asyncio.gather, 5.0s Timeout, Circuit Breaker)"]
+        PubMed["NCBI PubMed E-Utilities (XML/JSON)"]
+        OpenFDA["openFDA Drug Safety & Warnings"]
+        WHODON["WHO Disease Outbreak News"]
+        IngestionGate["Anti-Poisoning Ingestion Firewall\n(Relevance >= 0.50 & Min Length)"]
+    end
+
+    %% Multi-Provider LLM Gateway
+    subgraph LLMTier ["6. RESILIENT MULTI-PROVIDER LLM GATEWAY"]
+        LLMRouter["Failover LLM Provider Router"]
+        OpenRouter["OpenRouter (Llama 3.3 70B / Gemini 2.5)"]
+        Groq["Groq High-Throughput Inference"]
+        LocalLLM["Local Fallback (Ollama / Mock Engine)"]
+    end
+
+    %% Tier 1 to Tier 2
+    ClientTier -->|HTTP / JSON| APIGateway
+    ImageUpload -->|Multipart Form| VisionPreprocessor
+    VisionPreprocessor --> APIGateway
+    APIGateway --> SSEStreamer
+    APIGateway --> ClaimCache
+
+    %% Tier 2 to Tier 3
+    APIGateway --> TokenDetector
+    TokenDetector --> WeightedRRF
+
+    %% Tier 3 to Tier 4 (Retrieval)
+    WeightedRRF <--> ChromaDB
+    WeightedRRF <--> BM25Okapi
+
+    %% Stage 1 to Stage 2
+    WeightedRRF --> PassageGrader
+    PassageGrader --> StateMachine
+
+    %% State Machine Routing
+    StateMachine -->|CORRECT: >=0.80| Synthesizer
+    StateMachine -->|AMBIGUOUS / INCORRECT: <0.80| MCPDispatcher
+
+    %% MCP Fan-Out
+    MCPDispatcher --> PubMed
+    MCPDispatcher --> OpenFDA
+    MCPDispatcher --> WHODON
+
+    %% Gated Write-Back & Ingestion
+    PubMed & OpenFDA & WHODON --> IngestionGate
+    IngestionGate --> ContentHasher
+    ContentHasher --> SQLiteDocs
+    ContentHasher --> ChromaDB
+    ContentHasher --> BM25Okapi
+    IngestionGate --> Synthesizer
+
+    %% Stage 4 LLM Inference & Verification
+    Synthesizer <--> LLMRouter
+    LLMRouter --> OpenRouter
+    LLMRouter --> Groq
+    LLMRouter --> LocalLLM
+
+    Synthesizer --> CitationVerifier
+    CitationVerifier --> APIGateway
+    APIGateway -->|SSE Events / Verified Result| ClientTier
 ```
 
 ---
