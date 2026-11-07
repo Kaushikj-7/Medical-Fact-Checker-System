@@ -59,7 +59,7 @@ class MedicalEvaluator:
 
         context_lines = []
         for idx, doc in enumerate(documents, start=1):
-            context_lines.append(f"[{idx}] Title: {doc.title} (Source: {doc.source})\nText: {doc.text[:400]}")
+            context_lines.append(f"[{idx}] Title: {doc.title} (Source: {doc.source})\nText: {doc.text[:2500]}")
         context_str = "\n\n".join(context_lines)
 
         user_prompt = f"Claim to evaluate: \"{claim}\"\n\nRetrieved Evidence Passages:\n{context_str}"
@@ -72,7 +72,12 @@ class MedicalEvaluator:
                 is_suff = False
 
             raw_kw = data.get("search_keywords")
-            keywords = str(raw_kw).strip() if (raw_kw and str(raw_kw).strip().lower() != "none") else fallback_kw
+            if isinstance(raw_kw, list):
+                keywords = " ".join(str(k).strip() for k in raw_kw if k)
+            elif raw_kw and str(raw_kw).strip().lower() != "none":
+                keywords = str(raw_kw).strip()
+            else:
+                keywords = fallback_kw
 
             return EvaluationResult(
                 is_sufficient=is_suff,

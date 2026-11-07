@@ -89,8 +89,11 @@ class MedicalCRAGPipeline:
                 except Exception as e:
                     logger.warning("Auto-ingestion into ChromaDB failed: %s", e)
 
-                # Prioritize external docs, retaining at most 1 partially relevant local doc as background
-                evidence_pool = external_docs + retrieved_docs[:1]
+                # Prioritize external docs; only retain top-1 local doc if it had partial relevance
+                if retrieved_docs and eval_res.confidence >= 0.40:
+                    evidence_pool = external_docs + retrieved_docs[:1]
+                else:
+                    evidence_pool = external_docs
             else:
                 # Deterministic short-circuit when external medical literature yields 0 results
                 elapsed_ms = int((time.perf_counter() - t0) * 1000)

@@ -63,7 +63,7 @@ class MedicalSynthesizer:
         context_items: List[str] = []
         for idx, doc in enumerate(evidence_docs, start=1):
             context_items.append(
-                f"[{idx}] Title: {doc.title}\nSource: {doc.source}\nURL: {doc.url}\nExcerpt: {doc.text[:600]}"
+                f"[{idx}] Title: {doc.title}\nSource: {doc.source}\nURL: {doc.url}\nExcerpt: {doc.text[:2500]}"
             )
             citations.append(
                 SourceCitation(
@@ -85,9 +85,14 @@ class MedicalSynthesizer:
 
             explanation = str(data.get("clinical_explanation", ""))
 
-            # Extract bracket citations e.g. [1], [2] to strictly ground sources
+            # Extract bracket citations e.g. [1], [2], [1, 2], [1-3] to strictly ground sources
             import re
-            cited_indices = [int(m) for m in re.findall(r"\[(\d+)\]", explanation)]
+            bracket_blocks = re.findall(r"\[([^\]]+)\]", explanation)
+            cited_indices: List[int] = []
+            for block in bracket_blocks:
+                for num in re.findall(r"\b\d+\b", block):
+                    cited_indices.append(int(num))
+
             grounded_sources: List[SourceCitation] = []
             if cited_indices:
                 for idx in sorted(set(cited_indices)):
